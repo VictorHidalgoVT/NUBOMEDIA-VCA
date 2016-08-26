@@ -13,7 +13,7 @@
  *
  */
 
-var ws = new WebSocket('ws://' + location.host + '/nubofacedetector');
+var ws = new WebSocket('wss://' + location.host + '/nubofacedetector');
 var videoInput;
 var videoOutput;
 var webRtcPeer;
@@ -46,6 +46,7 @@ ws.onmessage = function(message) {
 		break;
 	case 'videoE2Elatency':
 	    document.getElementById('testVideoE2Elatency').innerHTML= "  VideoE2ELatency (ms): " + parsedMessage.message;
+	    alert("Yes i am in videoE2Elatency value" + parsedMessage.message);
 	    break;
 	case 'iceCandidate':
 	    webRtcPeer.addIceCandidate(parsedMessage.candidate, function (error) {
@@ -236,7 +237,7 @@ function set_scale(value) {
 function show_latency()
 {
     if ( document.getElementById('videoE2Elatency').checked) {
-	timerId = setInterval(get_stats,1000);
+	timerId = setInterval(get_stats,3000);
     }
     else {
 	document.getElementById('testVideoE2Elatency').innerHTML = "  VideoE2ELatency (ms): ";
@@ -248,12 +249,47 @@ function get_stats()
 {
     var message = {
 	id : 'get_stats',
-	val: ''
+	val: '1'
     };
 
     sendMessage(message);
 }
 
+function euclidean_dis(dis_val)
+{
+    var message = {
+	id: 'euclidean_dis',
+	val: dis_val
+    }
+
+    document.getElementById('euc_dis').innerHTML=dis_val;
+
+    sendMessage(message);
+}
+
+function track_threshold(dis_val)
+{
+    var message = {
+	id: 'track_threshold',
+	val: dis_val
+    }
+
+    document.getElementById('track_threshold').innerHTML=dis_val;
+
+    sendMessage(message);
+}
+
+function area_threshold(dis_val)
+{
+    var message = {
+	id: 'area_threshold',
+	val: dis_val
+    }
+
+    document.getElementById('area_threshold').innerHTML=dis_val;
+
+    sendMessage(message);
+}
 /**
  * Lightbox utility (to display media pipeline image in a modal dialog)
  */

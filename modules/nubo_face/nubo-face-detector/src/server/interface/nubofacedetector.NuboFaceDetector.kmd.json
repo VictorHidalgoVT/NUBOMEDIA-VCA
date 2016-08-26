@@ -15,6 +15,7 @@
 		    }
 		]
 	    },
+
 	    "methods": [
 		{
 		    "name": "showFaces",
@@ -27,6 +28,7 @@
 			}
 		    ]
 		},
+
 		{
 		    "name": "detectByEvent",
 		    "doc" : "To indicate to the algorithm if process all the images or only when it receives an event",
@@ -38,6 +40,7 @@
 			}	  
      		    ]
 		},
+
 		{
 		    "name": "sendMetaData",
 		    "doc" : "The faces detected (x,y,width,height) are sent as metadata ",
@@ -49,6 +52,7 @@
 			}	  
      		    ]
 		},
+
 		{
 		    "name": "multiScaleFactor",
 		    "doc": "Specify how much the image size is reduced at each haar image ",
@@ -60,6 +64,7 @@
 			}
 		    ]
 		},
+
 		{
 		    "name": "processXevery4Frames",
 		    "doc": "process x every 4 frames",
@@ -71,6 +76,7 @@
 			}
 		    ]
 		},
+
 		{
 		    "name": "widthToProcess",
 		    "doc": "this will be the width of the image that the algorithm is going to process to detect faces",
@@ -81,8 +87,112 @@
 			    "type": "int"
 			}
 		    ]
-		}
+		},
 
+		{
+		    "name": "euclideanDistance",
+		    "doc": "Distance among faces of consecutives faces to delete vibrations produced by little changes of pixels of the same faces. To produce a change in the position and size of the face, the distance between the same face of consecutives frames will have to be higher than this value",
+		    "params": [
+			{
+			    "name":"distance", 
+			    "doc":" 0,20 (8 default)",
+			    "type": "int"
+			}
+		    ]
+		},
+
+		{
+		    "name": "trackThreshold",
+		    "doc": "To be completed",
+		    "params": [
+			{
+			    "name":"threshold", 
+			    "doc":" 0,100 (30 default)",
+			    "type": "int"
+			}
+		    ]
+		},
+
+		{
+		    "name": "areaThreshold",
+		    "doc": "To be completed",
+		    "params": [
+			{
+			    "name":"threshold", 
+			    "doc":" 0,1000 (500 default)",
+			    "type": "int"
+			}
+		    ]
+		},
+		{
+		    "name": "activateServerEvents",
+		    "doc": "The events will be launched to the server with the information about the face detected.  milliseconds indicate the frequency with which events will be launched (0 millisecons => an event will be lauched, when there is some information",
+		    "params": [
+			{
+			    "name":"activate", 
+			    "doc":"1=>activate it, 0 desactivated",
+			    "type": "int"
+			},
+			{
+			    "name":"time", 
+			    "doc":"the frequency in ms to send the events",
+			    "type": "int"
+			}
+		    ]
+		}
+		
+	    ],
+	    "events": [
+		"OnFace"
+	    ]
+	}
+    ],
+
+    "events": [
+	{
+	    "name": "OnFace",
+	    "extends": "Media",
+	    "doc": "Notify information about the face detectected",
+	    "properties": [
+		{
+		    "name": "info",
+		    "doc": "Information abut the detected faces",
+		    "type": "FaceInfo[]"
+		}
+	    ]
+	}
+    ],
+    "complexTypes": [
+	{
+	    "typeFormat": "REGISTER",
+	    "name": "FaceInfo",
+	    "doc": "FaceInfo contains information about the detected face",
+	    "properties": [
+		{
+		    "name": "name",
+		    "doc": "This value contains the word face in order to identify the register",
+		    "type": "String"
+		},
+		{
+		    "name": "x", 
+		    "doc": "represent the x value of the upper left corner of the face ",
+		    "type": "int"
+		},
+		{
+		    "name": "y", 
+		    "doc": "represent the y value of the upper left corner of the face ",
+		    "type": "int"
+		},
+		{
+		    "name": "height",
+		    "doc": "Represent the height of the detected face",
+		    "type": "int"
+		},
+		{
+		    "name": "width",
+		    "doc": "Represent the width of the detected face",
+		    "type": "int"
+		}
 	    ]
 	}
     ]

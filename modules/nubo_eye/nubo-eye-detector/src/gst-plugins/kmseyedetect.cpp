@@ -1,21 +1,26 @@
 #include "kmseyedetect.h"
-
 #include <gst/gst.h>
 #include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
 #include <glib/gstdio.h>
+#include <string>
+#include <unistd.h>
+#include <iostream>
 #include <opencv2/opencv.hpp>
 #include <sys/time.h>
+#include <commons/kmsserializablemeta.h>
+#include <sstream>
 
+#include <commons/kms-core-marshal.h>
 
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define PLUGIN_NAME "nuboeyedetector"
 #define FACE_WIDTH 160
 #define EYE_WIDTH 320
-
 #define DEFAULT_FILTER_TYPE (KmsEyeDetectType)0
-
-
 #define FACE_CONF_FILE "/usr/share/opencv/haarcascades/haarcascade_frontalface_alt.xml"
 #define EYE_LEFT_CONF_FILE "/usr/share/opencv/haarcascades/haarcascade_mcs_lefteye.xml"
 #define EYE_RIGHT_CONF_FILE "/usr/share/opencv/haarcascades/haarcascade_mcs_righteye.xml"
@@ -25,12 +30,15 @@
 #define SIDE_PERCENTAGE 0
 #define NUM_FRAMES_TO_PROCESS 10
 #define FACE_TYPE "face"
+#define SERVER_EVENTS 0
+#define EVENTS_MS 30001
 
 #define PROCESS_ALL_FRAMES 4
 #define GOP 4
 #define DEFAULT_SCALE_FACTOR 25
 #define EYE_SCALE_FACTOR 1.1
-
+#define DEFAULT_EUCLIDEAN_DIS 7
+#define MAX_NUM_FPS_WITH_NO_DETECTION 1
 
 using namespace cv;
 
@@ -58,8 +66,18 @@ enum {
   PROP_SEND_META_DATA,  
   PROP_MULTI_SCALE_FACTOR,
   PROP_WIDTH_TO_PROCESS,
+  PROP_ACTIVATE_SERVER_EVENTS,
+  PROP_SERVER_EVENTS_MS,
   PROP_PROCESS_X_EVERY_4_FRAMES
 };
+
+
+enum {
+  SIGNAL_ON_EYE_EVENT,
+  LAST_SIGNAL
+};
+
+static guint kms_eye_detector_signals[LAST_SIGNAL] = { 0 };
 
 struct _KmsEyeDetectPrivate {
 
@@ -82,9 +100,14 @@ struct _KmsEyeDetectPrivate {
   int process_x_every_4_frames;
   int scale_factor;
   int num_frame;
+  int server_events;
+  int events_ms;
+  double time_events_ms;
   vector<Rect> *faces;
   vector<Rect> *eyes_l;
   vector<Rect> *eyes_r;
+  int frames_with_no_detection_el;
+  int frames_with_no_detection_er;
   /*detect event*/
   // 0(default) => will always run the alg; 
   // 1=> will only run the alg if the filter receive some special event
@@ -116,6 +139,16 @@ G_DEFINE_TYPE_WITH_CODE (KmsEyeDetect, kms_eye_detect,
 static CascadeClassifier fcascade;
 static CascadeClassifier eyes_rcascade;
 static CascadeClassifier eyes_lcascade;
+
+
+template<typename T>
+string toString(const T& value)
+{
+  std::stringstream ss;
+   ss << value;
+   return ss.str();
+}
+
 
 static int
 kms_eye_detect_init_cascade()
@@ -173,14 +206,17 @@ static void kms_eye_send_event(KmsEyeDetect *eye_detect,GstVideoFrame *frame)
 {
   GstStructure *face,*eye;
   GstStructure *ts;
-  GstEvent *event;
   GstStructure *message;
   int i=0;
   char elem_id[10];
   vector<Rect> *fd=eye_detect->priv->faces;
   vector<Rect> *ed_l=eye_detect->priv->eyes_l;
-  vector<Rect> *ed_r=eye_detect->priv->eyes_l;
+  vector<Rect> *ed_r=eye_detect->priv->eyes_r;
   int norm_faces = eye_detect->priv->scale_o2f;
+  std::string eyes_str = "";
+  struct timeval  end; 
+  double current_t, diff_time;
+  GstEvent *event;
 
   message= gst_structure_new_empty("message");
   ts=gst_structure_new("time",
@@ -189,20 +225,7 @@ static void kms_eye_send_event(KmsEyeDetect *eye_detect,GstVideoFrame *frame)
   gst_structure_set(message,"timestamp",GST_TYPE_STRUCTURE, ts,NULL);
   gst_structure_free(ts);
 		
-  for( vector<Rect>::const_iterator r = fd->begin(); r != fd->end(); r++,i++ )
-    {
-      face = gst_structure_new("face",
-			       "type", G_TYPE_STRING,"face", 
-			       "x", G_TYPE_UINT,(guint) r->x * norm_faces, 
-			       "y", G_TYPE_UINT,(guint) r->y * norm_faces, 
-			       "width",G_TYPE_UINT, (guint)r->width * norm_faces,
-			       "height",G_TYPE_UINT, (guint)r->height * norm_faces,
-			       NULL);
-      sprintf(elem_id,"%d",i);
-      gst_structure_set(message,elem_id,GST_TYPE_STRUCTURE, face,NULL);
-      gst_structure_free(face);
-    }
-  
+
   /*eyes are already normalized*/
   for(  vector<Rect>::const_iterator m = ed_l->begin(); m != ed_l->end(); m++,i++ )
     {
@@ -216,6 +239,13 @@ static void kms_eye_send_event(KmsEyeDetect *eye_detect,GstVideoFrame *frame)
       sprintf(elem_id,"%d",i);
       gst_structure_set(message,elem_id,GST_TYPE_STRUCTURE, eye,NULL);
       gst_structure_free(eye);
+      
+         //neccesary info for sending as event to the server
+      std::string new_eye ("x:" + toString((guint) m->x ) + 
+			    ",y:" + toString((guint) m->y ) + 
+			    ",width:" + toString((guint)m->width )+ 
+			    ",height:" + toString((guint)m->height )+ ";");
+      eyes_str= eyes_str + new_eye;
     }
 
   for(  vector<Rect>::const_iterator m = ed_r->begin(); m != ed_r->end(); m++,i++ )
@@ -230,14 +260,37 @@ static void kms_eye_send_event(KmsEyeDetect *eye_detect,GstVideoFrame *frame)
       sprintf(elem_id,"%d",i);
       gst_structure_set(message,elem_id,GST_TYPE_STRUCTURE, eye,NULL);
       gst_structure_free(eye);
+      
+      std::string new_eye ("x:" + toString((guint) m->x ) + 
+			    ",y:" + toString((guint) m->y ) + 
+			    ",width:" + toString((guint)m->width )+ 
+			    ",height:" + toString((guint)m->height )+ ";");
+      eyes_str= eyes_str + new_eye;
+    }
+
+  
+  if ((int)ed_r->size()>0 || (int)ed_l->size()>0)
+    {
+      
+      gettimeofday(&end,NULL);
+      current_t= ((end.tv_sec * 1000.0) + ((end.tv_usec)/1000.0));
+      diff_time = current_t - eye_detect->priv->time_events_ms;
+            
+      if (1 == eye_detect->priv->server_events && diff_time > eye_detect->priv->events_ms)
+	{
+	  eye_detect->priv->time_events_ms=current_t;
+	  g_signal_emit (G_OBJECT (eye_detect),
+	  		 kms_eye_detector_signals[SIGNAL_ON_EYE_EVENT], 0,eyes_str.c_str());
+	}
+            /*Adding data as a metadata in the video*/
+      /* if (1 == eye_detect->priv->meta_data)    	
+	 kms_buffer_add_serializable_meta (frame->buffer,message); */
     }
 
   //post a faces detected event to src pad7
   event = gst_event_new_custom (GST_EVENT_CUSTOM_DOWNSTREAM, message);
-  gst_pad_push_event(eye_detect->base.element.srcpad, event);
-	
+  gst_pad_push_event(eye_detect->base.element.srcpad, event); 
 }
-
 
 static void
 kms_eye_detect_conf_images (KmsEyeDetect *eye_detect,
@@ -256,7 +309,6 @@ kms_eye_detect_conf_images (KmsEyeDetect *eye_detect,
     }
   
   if (eye_detect->priv->img_orig == NULL)
-    
     eye_detect->priv->img_orig= cvCreateImageHeader(cvSize(frame->info.width,
 							   frame->info.height),
 						    IPL_DEPTH_8U, 3);
@@ -278,12 +330,11 @@ kms_eye_detect_set_property (GObject *object, guint property_id,
 			     const GValue *value, GParamSpec *pspec)
 {
   KmsEyeDetect *eye_detect = KMS_EYE_DETECT (object);
-
+  struct timeval  t;
   //Changing values of the properties is a critical region because read/write
   //concurrently could produce race condition. For this reason, the following
   //code is protected with a mutex
   KMS_EYE_DETECT_LOCK (eye_detect);
-
 
   switch (property_id) {
 
@@ -298,7 +349,6 @@ kms_eye_detect_set_property (GObject *object, guint property_id,
     eye_detect->priv->meta_data =  g_value_get_int(value);
     break;
 
-
   case PROP_PROCESS_X_EVERY_4_FRAMES:
     eye_detect->priv->process_x_every_4_frames = g_value_get_int(value);    
     break;
@@ -311,6 +361,15 @@ kms_eye_detect_set_property (GObject *object, guint property_id,
     eye_detect->priv->width_to_process = g_value_get_int(value);
     break;
 
+    case  PROP_ACTIVATE_SERVER_EVENTS:
+    eye_detect->priv->server_events = g_value_get_int(value);
+    gettimeofday(&t,NULL);
+    eye_detect->priv->time_events_ms= ((t.tv_sec * 1000.0) + ((t.tv_usec)/1000.0));    
+    break;
+    
+  case PROP_SERVER_EVENTS_MS:
+    eye_detect->priv->events_ms = g_value_get_int(value);
+    break;   
 
   default:
     G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -332,7 +391,6 @@ kms_eye_detect_get_property (GObject *object, guint property_id,
   KMS_EYE_DETECT_LOCK (eye_detect);
 
   switch (property_id) {
-
 
   case PROP_VIEW_EYES:
     g_value_set_int (value, eye_detect->priv->view_eyes);
@@ -356,6 +414,14 @@ kms_eye_detect_get_property (GObject *object, guint property_id,
 
   case PROP_WIDTH_TO_PROCESS:
     g_value_set_int(value,eye_detect->priv->width_to_process);
+    break;
+
+  case  PROP_ACTIVATE_SERVER_EVENTS:
+    g_value_set_int(value,eye_detect->priv->server_events);
+    break;
+    
+  case PROP_SERVER_EVENTS_MS:
+    g_value_set_int(value,eye_detect->priv->events_ms);
     break;
 
   default:
@@ -384,9 +450,8 @@ static gboolean __get_timestamp(KmsEyeDetect *eye,
   return ret;
 }
 
-
-static bool __get_message(KmsEyeDetect *eye,
-			  GstStructure *message)
+static bool __get_event_message(KmsEyeDetect *eye,
+				GstStructure *message)
 {
   gint len,aux;
   bool result=false;
@@ -406,61 +471,63 @@ static bool __get_message(KmsEyeDetect *eye,
     if (g_strcmp0 (name, "timestamp") == 0) {
       continue;
     }
-    sprintf(struct_id,"%d",id);    
-    if ((g_strcmp0(name,struct_id) == 0)) //get structure's id
-      {
-	id++;
 
-	//getting the structure
-	ret = gst_structure_get (message, name, GST_TYPE_STRUCTURE, &data, NULL);
-	if (ret) {
-	  //type of the structure
-	  gst_structure_get (data, "type", G_TYPE_STRING, &str_type, NULL);
-
-	  if (g_strcmp0(str_type,FACE_TYPE)==0)//only interested on FACE EVENTS
-	    {
-	      Rect r;
-	      gst_structure_get (data, "x", G_TYPE_UINT, & r.x, NULL);
-	      gst_structure_get (data, "y", G_TYPE_UINT, & r.y, NULL);
-	      gst_structure_get (data, "width", G_TYPE_UINT, & r.width, NULL);
-	      gst_structure_get (data, "height", G_TYPE_UINT, & r.height, NULL);	  	 
-	      gst_structure_free (data);
-	      eye->priv->faces->push_back(r);
-	    }	  
-	  result=true;
-	}
-      }
-  }            
+    //getting the structure
+    ret = gst_structure_get (message, name, GST_TYPE_STRUCTURE, &data, NULL);
+    if (ret) {
+      //type of the structure
+      gst_structure_get (data, "type", G_TYPE_STRING, &str_type, NULL);
+      
+      if (g_strcmp0(str_type,FACE_TYPE)==0)//only interested on FACE EVENTS
+	{
+	  
+	  Rect r;
+	  gst_structure_get (data, "x", G_TYPE_UINT, & r.x, NULL);
+	  gst_structure_get (data, "y", G_TYPE_UINT, & r.y, NULL);
+	  gst_structure_get (data, "width", G_TYPE_UINT, & r.width, NULL);
+	  gst_structure_get (data, "height", G_TYPE_UINT, & r.height, NULL);	  	 
+	  gst_structure_free (data);
+	  eye->priv->faces->push_back(r);
+	}	  
+      result=true;
+    }
+  }
+              
   return result;
 }
 
-
-static bool __process_alg(KmsEyeDetect *eye_detect, GstClockTime f_pts)
+static bool __receive_event(KmsEyeDetect *eye_detect, GstVideoFrame *frame)
 {
+  KmsSerializableMeta *metadata;
+  gboolean res = false;
   GstStructure *message;
-  bool res=false;
   gboolean ret = false;
   //if detect_event is false it does not matter the event received
 
   if (0==eye_detect->priv->detect_event) return true;
 
-
   if (g_queue_get_length(eye_detect->priv->events_queue) == 0) 
     return false;
-	
+  
   message= (GstStructure *) g_queue_pop_head(eye_detect->priv->events_queue);
-
+  
   if (NULL != message)
     {
-
+      
       ret=__get_timestamp(eye_detect,message);
-
+      
       if ( ret )
 	{
-	  res = __get_message(eye_detect,message);	  
+	  res = __get_event_message(eye_detect,message);	  
 	}
     }
 
+  /*metadata = kms_buffer_get_serializable_meta(frame->buffer);
+
+  if (NULL == metadata)   
+    return false;
+
+    res = __get_event_message(eye_detect,metadata->data);	  */
 
   if (res) 
     eye_detect->priv->num_frames_to_process = NUM_FRAMES_TO_PROCESS / 
@@ -468,7 +535,6 @@ static bool __process_alg(KmsEyeDetect *eye_detect, GstClockTime f_pts)
   
   return res;
 }
-
 
 static bool __contain_bb(Point p,Rect r)
 { 
@@ -482,21 +548,21 @@ static bool __contain_bb(Point p,Rect r)
   return false;
 }
 
-
-static void __mergeEyes( Rect face_bb, std::vector<Rect> &eye_r, std::vector<Rect> &eyes, bool eye_left )
+static void __merge_eyes_current_frame( Rect face_bb, std::vector<Rect> *eye_r, std::vector<Rect> &eyes, int scale, bool eye_left )
 {
 int i =0;
   vector<Rect>::iterator it;
   Point eye_center,eye_center_2;
+  /*As the number of eyes is higher than one, we need to get only one*/
   
   for (i=eyes.size()-1;i>0 ; i--)
-    {
+    {/*We compare the different eyes. To delete one of them, this has to be included in the 
+      burble of other eye and has to have a bigger area*/
+
       eye_center.x =   eyes[i].x + eyes[i].width/2;
       eye_center.y =   eyes[i].y + eyes[i].height/2;
-      if (__contain_bb(eye_center,eyes[i-1]) &&  eyes[i].area() < eyes[i-1].area())
-	
-	eyes.erase(eyes.end()-i-1);
-      
+      if (__contain_bb(eye_center,eyes[i-1]) &&  eyes[i].area() < eyes[i-1].area())	
+	eyes.erase(eyes.end()-i-1);      
       else 
 	{
 	  eye_center.x =   eyes[i-1].x + eyes[i-1].width/2;
@@ -506,38 +572,36 @@ int i =0;
 	    eyes.erase(eyes.end()-i);	     
 	}
     }
-
+ 
   /*We need to modify the y axis for  all the eyes which have been located at the top of ROI. 
-   Since, the eyebrow can lead errors*/
-      
-  i = eyes.size();
-  
+    Since, the eyebrow can lead errors*/
+
+  i = eyes.size();  
   for( vector<Rect>::reverse_iterator r = eyes.rbegin(); r != eyes.rend(); ++r )
     {
       i--;
-      int y_aux= face_bb.y + face_bb.height*TOP_PERCENTAGE/100;
+      int y_aux= face_bb.y*scale + face_bb.height*scale*60/100;
       
-      if ((face_bb.y + eyes[i].y < y_aux) )	
+      if ((face_bb.y*scale + eyes[i].y < y_aux) )	
 	{	  
 	  if ( i == 0 && eyes.size() == 1 )
 	    {
-	      if (eye_r.size()>0 && eye_left )		
-		eyes[i].y = eye_r[0].y;
+	      if (eye_r->size()>0 && eye_left )		
+		eyes[i].y = eye_r->at(0).y;
 	      
 	    }
 	  else 	    
 	    eyes.erase(--r.base());	      
 	}	
     }
-
   /*the size of the vector can not be > 1, because we are seeking for an eye in a 
     small part of the image (approximately between the ear and nose), if this happens
-    we need  to find the eye_center closest to the left and center middle. */
+    we need  to find the eye_center closest to the left and center middle.*/
     
   if (eyes.size()>1)
     {
-      int middle_y = face_bb.height/2;
-      int middle_x = face_bb.width/2;
+      int middle_y = face_bb.x*scale + face_bb.height*scale/2;
+      int middle_x = face_bb.y*scale + face_bb.width*scale/2;
       
       for (i=eyes.size()-1;i>0;i--)
 	{
@@ -546,7 +610,6 @@ int i =0;
 	  eye_center_2.y =   eyes[i-1].y + eyes[i-1].height/2;
 	  eye_center_2.x =   eyes[i-1].x + eyes[i-1].width/2;
 	    
-
 	  float sqrt_1point= sqrt(pow(middle_x - eye_center.x,2) + 
 				  pow(middle_y - eye_center.y,2));
 	  float sqrt_2point = sqrt(pow(middle_x - eye_center_2.x,2) + 
@@ -556,33 +619,94 @@ int i =0;
 	    eyes.erase(eyes.end()-i-1);
 	  else	      
 	    eyes.erase(eyes.end()-i);  	  
-	}	      
-	
+	}	      	
+    }    
+
+  /*The left eye presents some problems with eyebrow. As a consequence the y coordinate
+   is located on the eyebrow, to fix that we put exactly the same Y coordinate than in the 
+  right eye*/  
+  if (eye_left)  
+    {
+      if ( (eye_r->size() > 0) && (eyes.size()> 0) && eye_left)
+	  eyes[0].y=eye_r->at(0).y;
+
     }
-  
-  
+
 }
 
+static vector<Rect> *__merge_eyes_consecutives_frames(vector<Rect> *ce, vector<Rect> *eyes,
+						      Rect &face_cord, int scale, bool eye_left)
+{
+  vector<Rect>::iterator it_e ;
+  vector<Rect> *res = new vector<Rect>;
+
+
+  for (int i=0; i < (int)(eyes->size()); i++)
+    {
+      Point old_center;
+      old_center.x = eyes->at(i).x + eyes->at(i).width/2;
+      old_center.y = eyes->at(i).y + eyes->at(i).height/2;
+
+      for (int j=0; j < (int)(ce->size()); j++)
+	{
+	  Point new_center;	  
+	  new_center.x = ce->at(j).x + (ce->at(j).width )/2;
+	  new_center.y = ce->at(j).y + (ce->at(j).height)/2;
+	  double h2 = sqrt(pow((new_center.x -old_center.x),2) + 
+			   pow((new_center.y - old_center.y),2));	  
+	  if (h2 < DEFAULT_EUCLIDEAN_DIS)
+	    { /*As the difference among pixels is very low, we mantain the coordinates of the
+		previous eye in order to avoid vibrations*/	      
+	      res->push_back(eyes->at(i));
+	      ce->erase(ce->begin()+j);	      
+	      break;
+	    }
+	}     
+    } 
+
+
+  if (ce->size() > 0)
+      for(it_e = ce->begin(); it_e != ce->end();it_e++)
+	res->push_back(*it_e);
+
+  return res;
+}
+
+static void transform_2_global_coordinates(vector<Rect> *eye_v,Rect face_cord,int scale)
+{
+  vector<Rect>::iterator it_e ;
+
+  for(it_e = eye_v->begin(); it_e != eye_v->end();it_e++)
+    {
+      it_e->x= (face_cord.x + it_e->x)*scale;
+      it_e->y= (face_cord.y + it_e->y)*scale;
+      it_e->width=  (it_e->width-1)*scale;
+      it_e->height=  (it_e->height-1)*scale;      
+    }
+}
 
 static void
 kms_eye_detect_process_frame(KmsEyeDetect *eye_detect,int width,int height,double scale_o2f,
-			     double scale_o2e,double scale_f2e, GstClockTime pts)
+			     double scale_o2e,double scale_f2e, GstVideoFrame *frame)
 {
   Mat img (eye_detect->priv->img_orig);
   Mat f_faces(cvRound(img.rows/scale_o2f),cvRound(img.cols/scale_o2f),CV_8UC1);
   Mat frame_gray;
   Mat eye_frame (cvRound(img.rows/scale_o2e), cvRound(img.cols/scale_o2e), CV_8UC1);
-  Rect f_aux;
+  Rect f_aux_r,f_aux_l;
   int down_height=0;
   int top_height=0;
+  int k=0;
   std::vector<Rect> *faces=eye_detect->priv->faces;
   std::vector<Rect> *eyes_r=eye_detect->priv->eyes_r;
   std::vector<Rect> *eyes_l=eye_detect->priv->eyes_l;
   vector<Rect> eye_r,eye_l;
+  vector<Rect> *res_r = new vector<Rect>;
+  vector<Rect> *res_l = new vector<Rect>;
   Rect r_aux;
   Rect eye_right;
 
-  if ( ! __process_alg(eye_detect,pts) && eye_detect->priv->num_frames_to_process <=0)
+  if ( ! __receive_event(eye_detect,frame) && eye_detect->priv->num_frames_to_process <=0)
     return;
 
   eye_detect->priv->num_frame++;
@@ -600,7 +724,6 @@ kms_eye_detect_process_frame(KmsEyeDetect *eye_detect,int width,int height,doubl
 
       /*To detect the faces we need to work in 320 240*/
       //if detect_event != 0 we have received faces as meta-data
-      printf("Before faces \n");
       if (0 == eye_detect->priv->detect_event )
 	{      
 	  resize(frame_gray,f_faces,f_faces.size(),0,0,INTER_LINEAR);
@@ -609,80 +732,119 @@ kms_eye_detect_process_frame(KmsEyeDetect *eye_detect,int width,int height,doubl
 				    MULTI_SCALE_FACTOR(eye_detect->priv->scale_factor),
 				    3, 0, Size(30, 30));   //1.2
 	}
+
       resize(frame_gray,eye_frame,eye_frame.size(), 0,0,INTER_LINEAR);
       equalizeHist( eye_frame, eye_frame);
 
       int i = 0;
-      eyes_r->clear();
-      eyes_l->clear();
+
       for( vector<Rect>::iterator r = faces->begin(); r != faces->end(); r++, i++ )
 	{   
+	  vector<Rect> *result_aux;
 	  /*To detect eyes we need to work in the normal width 640 480*/
 	  r_aux.x = r->x*scale_f2e;
 	  r_aux.y = r->y*scale_f2e;
 	  r_aux.width = r->width*scale_f2e;
 	  r_aux.height  = r->height*scale_f2e;
 	  
+	  /*Clearing the area of the forehead and chin, 
+	    and taking only the left side of the face*/
 	  down_height=cvRound((float)r_aux.height*DOWN_PERCENTAGE/100);
 	  top_height=cvRound((float)r_aux.height*TOP_PERCENTAGE/100);
 	  
-	  f_aux.x= r_aux.x;
-	  f_aux.y= r_aux.y + top_height;
-	  f_aux.height= r_aux.height - top_height - down_height;
-	  f_aux.width = r_aux.width/2;
+	  /****** RIGHT EYE ******/
+	  f_aux_r.x= r_aux.x;
+	  f_aux_r.y= r_aux.y + top_height;
+	  f_aux_r.height= r_aux.height - top_height - down_height;
+	  f_aux_r.width = r_aux.width/2;
 	  
-	  Mat faceROI = eye_frame(f_aux);
-            
+	  Mat faceROI = eye_frame(f_aux_r);            
 	  //-- In each face, detect eyes. The pointed obtained are related to the ROI
-	  eye_r.clear();
+	  if (eye_r.size() > 0 ) eye_r.clear();
 	  eyes_rcascade.detectMultiScale( faceROI, eye_r,EYE_SCALE_FACTOR , 2, 
 					  0 |CASCADE_SCALE_IMAGE, 
-					  Size(20, 20));	  
-	    
-	  if (eye_r.size() > 0)
-	    {
-	      __mergeEyes(f_aux,eye_r,eye_r,false);		  
-	      Rect bb_reye((r_aux.x + eye_r[0].x)*scale_o2e,
-			   (r_aux.y + eye_r[0].y + top_height)*scale_o2e,
-			   (eye_r[0].width -1) *scale_o2e ,
-			   (eye_r[0].height-1)*scale_o2e);
-	      eyes_r->push_back(bb_reye);
-	    }
-	  
-	  
-	  f_aux.x=  r_aux.x + r_aux.width/2;	
-	  f_aux.y= r_aux.y + top_height;
-	  f_aux.height= r_aux.height - top_height- down_height;
-	  f_aux.width = r_aux.width/2;
-	  
-	  faceROI = eye_frame(f_aux);
+					  Size(20, 20));	  	    
 
-	  eye_l.clear(); 
+	  /****** LEFT EYE ******/
+	  f_aux_l.x=  r_aux.x + r_aux.width/2;	
+	  f_aux_l.y=  r_aux.y + top_height;
+	  f_aux_l.height= r_aux.height - top_height- down_height;
+	  f_aux_l.width = r_aux.width/2;	 
+	  
+	  faceROI = eye_frame(f_aux_l); 
+	  
 	  eyes_lcascade.detectMultiScale( faceROI, eye_l, EYE_SCALE_FACTOR,  2,
 					  0 |CASCADE_SCALE_IMAGE, 
 					  Size(20, 20) );
+
+	  /****** WORKING WiTH GLOBAL COORDINATES ******/
+	  transform_2_global_coordinates(&eye_r,f_aux_r,scale_o2e);
+	  transform_2_global_coordinates(&eye_l,f_aux_l,scale_o2e);
+
+	  /****** SELECTING THE BEST VALUE FOR EVERY EYE ******/
+	  if (eye_r.size() > 0)
+	    {
+	      __merge_eyes_current_frame(f_aux_r,&eye_r,eye_r,scale_o2e, false);
+	      result_aux= __merge_eyes_consecutives_frames(&eye_r,eyes_r,f_aux_r,scale_o2e,false);
+	      for ( k=0; k < (int)(result_aux->size()); k++)				
+		res_r->push_back(result_aux->at(k));				
+	    }
+
 	  if (eye_l.size() > 0)
 	    {
-	      __mergeEyes(f_aux,eye_r,eye_l,true);
-	      Rect bb_leye((r_aux.x + r_aux.width/2 + eye_l[0].x) *scale_o2e ,
-			   (r_aux.y + top_height + eye_l[0].y) *scale_o2e ,
-			   (eye_l[0].width - 1 ) *scale_o2e,
-			   (eye_l[0].height -1 ) *scale_o2e);
-	      eyes_l->push_back(bb_leye);
-	    }
+	      if (result_aux->size()>0) result_aux->clear();
+	      
+	      __merge_eyes_current_frame(f_aux_l,res_r,eye_l,scale_o2e,true);	      
+	      result_aux= __merge_eyes_consecutives_frames(&eye_l,eyes_l,f_aux_l,scale_o2e,true);  
+
+	      for ( k=0; k < (int)(result_aux->size()); k++)		
+		res_l->push_back(result_aux->at(k));
+	    }	  
 	}
-    }
       
+      if (res_r->size() < 1)
+	//Not results found for right eye
+	if (eye_detect->priv->frames_with_no_detection_er < MAX_NUM_FPS_WITH_NO_DETECTION)
+	  eye_detect->priv->frames_with_no_detection_er +=1;
+	else {
+	  eye_detect->priv->frames_with_no_detection_er =0;
+	  eye_detect->priv->eyes_r->clear();
+	}
+      else //result found
+	{
+	  eye_detect->priv->frames_with_no_detection_er =0;
+	  eye_detect->priv->eyes_r->clear();
+	  for (k=0;k < (int)(res_r->size());k++)
+	    eye_detect->priv->eyes_r->push_back(res_r->at(k));
+	}
+
+      if (res_l->size() < 1)
+	//Not results found for right eye
+	if (eye_detect->priv->frames_with_no_detection_el < MAX_NUM_FPS_WITH_NO_DETECTION)
+	  eye_detect->priv->frames_with_no_detection_el +=1;
+	else {
+	  eye_detect->priv->frames_with_no_detection_el =0;
+	  eye_detect->priv->eyes_l->clear();
+	}
+      else //result found
+	{
+	  eye_detect->priv->frames_with_no_detection_el =0;
+	  eye_detect->priv->eyes_l->clear();
+	  for (k=0;k < (int)(res_l->size());k++)
+	    eye_detect->priv->eyes_l->push_back(res_l->at(k));
+	}
+    }       
+  
   if (GOP == eye_detect->priv->num_frame )
     eye_detect->priv->num_frame=0;
-  
+    
   /*Here we only have one BB per eye_x*/
   if (1 == eye_detect->priv->view_eyes )
     {
       int radius=-1;
       
       if (eyes_r->size() > 0)
-	{
+	{	  
 	  Point eye_center_r( (*eyes_r)[0].x + (*eyes_r)[0].width/2,
 			      (*eyes_r)[0].y + (*eyes_r)[0].height/2 );
 	  radius = cvRound( ((*eyes_r)[0].width + (*eyes_r)[0].height)*0.25 );
@@ -698,11 +860,10 @@ kms_eye_detect_process_frame(KmsEyeDetect *eye_detect,int width,int height,doubl
 	  
 	  circle( img, eye_center_l, radius, Scalar( 255, 0, 0 ), 4, 8, 0 );
 	}
-    }
-  
+    }  
 }
 
-/**
+/** 
  * This function contains the image processing.
  */
 static GstFlowReturn
@@ -713,11 +874,7 @@ kms_eye_detect_transform_frame_ip (GstVideoFilter *filter,
   GstMapInfo info;
   double scale_o2f=0.0,scale_o2e=0.0,scale_f2e;
   int width=0,height=0;
-  
-  struct timeval  start,end;
-  gettimeofday(&start,NULL);
-
-  
+    
   gst_buffer_map (frame->buffer, &info, GST_MAP_READ);
   //setting up images
   kms_eye_detect_conf_images (eye_detect, frame, info);
@@ -734,22 +891,13 @@ kms_eye_detect_transform_frame_ip (GstVideoFilter *filter,
   KMS_EYE_DETECT_UNLOCK (eye_detect);
 
   kms_eye_detect_process_frame(eye_detect,width,height,scale_o2f,
-			       scale_o2e,scale_f2e,frame->buffer->pts);
+			       scale_o2e,scale_f2e,frame);
   
-  if (1==eye_detect->priv->meta_data)
-    kms_eye_send_event(eye_detect,frame);
+
+  kms_eye_send_event(eye_detect,frame);
 
   gst_buffer_unmap (frame->buffer, &info);
 
-    gettimeofday(&end,NULL);
-
-  unsigned long long time_start= (((float)start.tv_sec * 1000.0) + (float(start.tv_usec)/1000.0));
-  unsigned long long time_end=  (((float)end.tv_sec * 1000.0) + (float(end.tv_usec)/1000.0));
-  unsigned long long total_time = time_end - time_start;
-
-  FILE *f = fopen("/tmp/eye_detector.log","a+");
-  fprintf(f,"Iteration time %llu \n",total_time);
-  fclose(f);
 
   return GST_FLOW_OK;
 }
@@ -806,11 +954,16 @@ kms_eye_detect_init (KmsEyeDetect *
   eye_detect->priv->eyes_l= new vector<Rect>;
   eye_detect->priv->eyes_r= new vector<Rect>;
   eye_detect->priv->num_frames_to_process=0;
+  eye_detect->priv->frames_with_no_detection_el=0;
+  eye_detect->priv->frames_with_no_detection_er=0;
 
   eye_detect->priv->process_x_every_4_frames=PROCESS_ALL_FRAMES;
   eye_detect->priv->num_frame=0;
   eye_detect->priv->scale_factor=DEFAULT_SCALE_FACTOR;
   eye_detect->priv->width_to_process=EYE_WIDTH;
+  eye_detect->priv->server_events =SERVER_EVENTS;
+  eye_detect->priv->events_ms =EVENTS_MS;
+
 
   if (fcascade.empty())
     if (kms_eye_detect_init_cascade() < 0)
@@ -863,7 +1016,7 @@ kms_eye_detect_class_init (KmsEyeDetectClass *eye)
 						     0,1,FALSE, (GParamFlags) G_PARAM_READWRITE));
   
   g_object_class_install_property (gobject_class, PROP_SEND_META_DATA,
-				   g_param_spec_int ("meta-data", "send meta data",
+				   g_param_spec_int ("send-meta-data", "send meta data",
 						     "0 (default) => it will not send meta data; 1 => it will send the bounding box of the eye and face", 
 						     0,1,FALSE, (GParamFlags) G_PARAM_READWRITE));
 
@@ -883,8 +1036,26 @@ kms_eye_detect_class_init (KmsEyeDetectClass *eye)
 						     "5-50  (25 default) => specifying how much the image size is reduced at each image scale.", 
 						     0,51,FALSE, (GParamFlags) G_PARAM_READWRITE));
 	  
+  
+  g_object_class_install_property (gobject_class,   PROP_ACTIVATE_SERVER_EVENTS,
+				   g_param_spec_int ("activate-events", "Activate Events",
+						     "(0 default) => It will not send events to server, 1 => it will send events to the server", 
+						     0,1,FALSE, (GParamFlags) G_PARAM_READWRITE));
+  
+  g_object_class_install_property (gobject_class,   PROP_SERVER_EVENTS_MS,
+				   g_param_spec_int ("events-ms",  "Activate Events",
+						    "the time, it takes to send events to the servers", 
+			          0,30000,FALSE, (GParamFlags) G_PARAM_READWRITE));
+
   video_filter_class->transform_frame_ip =
     GST_DEBUG_FUNCPTR (kms_eye_detect_transform_frame_ip);
+
+  kms_eye_detector_signals[SIGNAL_ON_EYE_EVENT] =
+    g_signal_new ("eye-event",
+		  G_TYPE_FROM_CLASS (eye),
+		  G_SIGNAL_RUN_LAST,
+		  0, NULL, NULL, NULL,
+		  G_TYPE_NONE, 1, G_TYPE_STRING);
 
   /*Properties initialization*/
   g_type_class_add_private (eye, sizeof (KmsEyeDetectPrivate) );

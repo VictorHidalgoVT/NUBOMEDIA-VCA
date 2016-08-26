@@ -43,26 +43,37 @@ public:
 
   NuboFaceDetectorImpl (const boost::property_tree::ptree &config, std::shared_ptr<MediaPipeline> mediaPipeline);
 
-  virtual ~NuboFaceDetectorImpl () {};
+  virtual ~NuboFaceDetectorImpl ();
 
-  void showFaces(int viewFaces);
-  void detectByEvent(int event);
-  void sendMetaData(int metaData);
-  void multiScaleFactor(int scaleFactor);
-  void processXevery4Frames(int xper4);
-  void widthToProcess(int width);
+  void showFaces (int viewFaces);
+  void detectByEvent (int event);
+  void sendMetaData (int metaData);
+  void multiScaleFactor (int scaleFactor);
+  void processXevery4Frames (int xper4);
+  void widthToProcess (int width);
+  void euclideanDistance (int distance);
+  void trackThreshold (int threshold);
+  void areaThreshold (int threshold);
+  void activateServerEvents (int activate,int ms);
 
   /* Next methods are automatically implemented by code generator */
   virtual bool connect (const std::string &eventType, std::shared_ptr<EventHandler> handler);
+
+  sigc::signal<void, OnFace> signalOnFace;
   virtual void invoke (std::shared_ptr<MediaObjectImpl> obj,
                        const std::string &methodName, const Json::Value &params,
                        Json::Value &response);
 
   virtual void Serialize (JsonSerializer &serializer);
 
-private:
+protected: 
+  virtual void postConstructor ();
 
-  GstElement *nubo_face = NULL;
+private:
+  GstElement *nubo_face = NULL; 
+  gulong handlerOnFaceEvent = 0;
+  void onFace (gchar *);
+  void split_message (std::string fi, std::string delimiter, std::vector<std::string> *v);
   class StaticConstructor
   {
   public:

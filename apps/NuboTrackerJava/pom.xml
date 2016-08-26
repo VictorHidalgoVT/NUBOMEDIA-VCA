@@ -1,14 +1,19 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"> 
+
 	<modelVersion>4.0.0</modelVersion>
-
-	<parent>
-		<groupId>com.vtools.vca</groupId>
-		<artifactId>nubomedia-vca</artifactId>
-		<version>6.1.0</version>
-	</parent>
-
+	
+	<groupId>com.visual-tools.nubomedia</groupId>
+	
 	<artifactId>NuboTrackerJava</artifactId>
 	<packaging>jar</packaging>
+	
+	<parent>	  
+	  <groupId>org.kurento</groupId>
+	  <artifactId>kurento-parent-pom</artifactId>
+	  <version>6.4.1-SNAPSHOT</version>
+	</parent>
+
 
 	<name>NuboTrackerJava Filter</name>
 	<description>NuboMedia Face Detector Filter</description>
@@ -43,8 +48,10 @@
 	</developers>
 
 	<properties>
-		<!-- Main class -->
-		<start-class>com.vtools.nubomedia.nuboTrackerJava.NuboTrackerJavaApp</start-class>
+	  <!-- Nubomedia -->
+	  <nubomedia-media-client.version>1.0.1</nubomedia-media-client.version>
+	  <!-- Main class -->
+	  <start-class>com.visual_tools.nubomedia.nuboTrackerJava.NuboTrackerJavaApp</start-class>
 	</properties>
 
 	<dependencies>
@@ -62,19 +69,29 @@
 			<groupId>org.kurento</groupId>
 			<artifactId>kurento-client</artifactId>
 		</dependency>
+
 		<dependency>
 			<groupId>org.kurento</groupId>
 			<artifactId>kurento-utils-js</artifactId>
 		</dependency>
+		
+		<!-- Nubomedia -->
 		<dependency>
-			<groupId>org.kurento.module</groupId>
+			<groupId>com.visual-tools.nubomedia</groupId>
 			<artifactId>nubotracker</artifactId>
-			<version>0.0.4-SNAPSHOT</version>
+			<version>6.4.02</version>
 		</dependency>
+
+		<dependency>
+		  <groupId>de.fhg.fokus.nubomedia</groupId>
+		  <artifactId>nubomedia-media-client</artifactId>
+		  <version>${nubomedia-media-client.version}</version>
+		</dependency>
+		
 	</dependencies>
 
 	<build>
-		<plugins>
+	      <plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
@@ -105,6 +122,7 @@
 					<executable>bower</executable>
 					<arguments>
 						<argument>install</argument>
+						<argument>--allow-root</argument>
 					</arguments>
 					<mainClass>${start-class}</mainClass>
 				</configuration>
@@ -143,53 +161,18 @@
 		</resources>
 	</build>
 
-	<profiles>
-		<profile>
-			<id>default</id>
-			<activation>
-				<activeByDefault>true</activeByDefault>
-			</activation>
-			<build>
-				<plugins>
-					<plugin>
-						<groupId>org.apache.maven.plugins</groupId>
-						<artifactId>maven-assembly-plugin</artifactId>
-						<configuration>
-							<descriptor>src/assembly/bin.xml</descriptor>
-							<finalName>${project.artifactId}-${project.version}</finalName>
-							<appendAssemblyId>false</appendAssemblyId>
-						</configuration>
-						<executions>
-							<execution>
-								<phase>package</phase>
-								<goals>
-									<goal>single</goal>
-								</goals>
-							</execution>
-						</executions>
-					</plugin>
-					<plugin>
-						<groupId>org.apache.maven.plugins</groupId>
-						<artifactId>maven-antrun-plugin</artifactId>
-						<executions>
-							<execution>
-								<phase>package</phase>
-								<configuration>
-									<tasks>
-										<copy
-											file="${project.build.directory}/target/${project.artifactId}-${project.version}-bin.zip"
-											tofile="${project.build.directory}/target/${project.artifactId}-${project.version}.zip" />
-									</tasks>
-								</configuration>
-							</execution>
-						</executions>
-					</plugin>
-				</plugins>
-			</build>
-		</profile>
-		<profile>
-			<id>no-assembly</id>
-		</profile>
-	</profiles>
+	<repositories>
+		<repository>
+			<id>kurento-snapshots</id>
+			<name>Kurento Snapshot Repository</name>
+			<url>http://maven.kurento.org/archiva/repository/snapshots/</url>
+			<releases>
+				<enabled>false</enabled>
+			</releases>
+			<snapshots>
+				<enabled>true</enabled>
+			</snapshots>
+		</repository>
+	</repositories>
 
 </project>
